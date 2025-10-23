@@ -61,6 +61,10 @@ app.get("/api/leaderboard", async (req, res) => {
   }
 });
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT;
+if (!port) {
+  console.error("PORT not set. Exiting.");
+  process.exit(1);
+}
 app.get("/", (_req, res) => res.send("Race API is up"));
 app.listen(port, () => console.log(`Server listening on port ${port}`));
