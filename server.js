@@ -7,7 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// === MongoDB Ayarları ===
 const uri = process.env.MONGO_URI;
 if (!uri) {
   console.error("MONGO_URI not set in environment variables");
@@ -18,12 +17,25 @@ const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology:
 const dbName = process.env.DB_NAME || "RaceGame";
 const collectionName = process.env.COLLECTION_NAME || "Leaderboard";
 
-// === Skor Gönderme ===
-// Aynı (playerID + carID) varsa güncelle, yoksa ekle
+async function initIndexes() {
+  try {
+    await client.connect();
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Benzersiz index (her oyuncu ve araba kombinasyonu için)
+    await collection.createIndex({ playerID: 1, carID: 1 }, { unique: true });
+    console.log("✅ Unique index created on (playerID, carID)");
+  } catch (err) {
+    console.error("Index creation failed:", err);
+  }
+}
+initIndexes();
+
+// ✅ POST /api/score — insert or update
 app.post("/api/score", async (req, res) => {
   try {
     const { playerID, playerName, carID, distance } = req.body;
-
     if (!playerID || !playerName || carID === undefined || distance === undefined) {
       return res.status(400).json({ error: "Missing fields" });
     }
@@ -32,57 +44,48 @@ app.post("/api/score", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    await collection.updateOne(
-      { playerID: playerID, carID: carID }, // unique key ikilisi
+    // Eğer bu (playerID, carID) varsa distance güncelle, yoksa yeni ekle
+    const result = await collection.updateOne(
+      { playerID, carID },
       {
         $set: {
-          playerID,
           playerName,
-          carID,
           distance,
-          lastUpdate: new Date(),
-        },
+          lastUpdate: new Date()
+        }
       },
       { upsert: true }
     );
 
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, upserted: result.upsertedId });
   } catch (err) {
-    console.error("POST /api/score error:", err);
+    console.error("Error in /api/score:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-// === Leaderboard Getirme ===
+// ✅ GET /api/leaderboard — tüm kayıtlar (distance'a göre sıralı)
 app.get("/api/leaderboard", async (_req, res) => {
   try {
     await client.connect();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    const docs = await collection
-      .find({})
+    const docs = await collection.find({})
       .sort({ distance: -1 })
       .limit(1000)
-      .project({
-        _id: 0,
-        playerID: 1,
-        playerName: 1,
-        carID: 1,
-        distance: 1,
-      })
       .toArray();
 
     return res.json(docs);
   } catch (err) {
-    console.error("GET /api/leaderboard error:", err);
+    console.error("Error in /api/leaderboard:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-// === Test Route ===
-app.get("/", (_req, res) => res.send("Race API is up"));
+// ✅ Root kontrol
+app.get("/", (_req, res) => res.send("Race API is running ✅"));
 
-// === Server Başlat ===
-const port = process.env.PORT || 8080;
-app.listen(port, () => console.log(`✅ Server listening on port ${port}`));
+// ✅ Port dinleme
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server listening on port ${port}`));
