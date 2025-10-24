@@ -19,7 +19,7 @@ const dbName = process.env.DB_NAME || "RaceGame";
 const collectionName = process.env.COLLECTION_NAME || "Leaderboard";
 
 // === Skor Gönderme ===
-// Aynı playerID varsa güncelle, yoksa ekle (upsert)
+// Aynı (playerID + carID) varsa güncelle, yoksa ekle
 app.post("/api/score", async (req, res) => {
   try {
     const { playerID, playerName, carID, distance } = req.body;
@@ -32,9 +32,8 @@ app.post("/api/score", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // Upsert işlemi: Aynı playerID varsa güncelle
     await collection.updateOne(
-      { playerID: playerID },
+      { playerID: playerID, carID: carID }, // unique key ikilisi
       {
         $set: {
           playerID,
