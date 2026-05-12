@@ -86,6 +86,11 @@ app.get("/api/leaderboard", async (_req, res) => {
 // ✅ Root kontrol
 app.get("/", (_req, res) => res.send("Race API is running ✅"));
 
+// ✅ Cronjob için uyanık tutma endpoint'i (Hafif ve hızlı)
+app.get("/ping", (_req, res) => {
+  res.status(200).send("OK");
+});
+
 // ✅ Port dinleme
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server listening on port ${port}`));
