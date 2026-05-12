@@ -80,15 +80,9 @@ app.post("/api/score", async (req, res) => {
     }
 
     // ---- Rank hesaplama helper ----
-    async function calcRanks(dist, cID) {
-      const [carRank, globalRank] = await Promise.all([
-        collection.countDocuments({ carID: cID, distance: { $gt: dist } }),
-        collection.countDocuments({ distance: { $gt: dist } })
-      ]);
-      return {
-        distanceCarRank: carRank + 1,
-        distanceGlobalRank: globalRank + 1
-      };
+    async function calcRanks(dist) {
+      const better = await collection.countDocuments({ distance: { $gt: dist } });
+      return { distanceGlobalRank: better + 1 };
     }
 
     const existing = await collection.findOne({ playerID, carID });
@@ -129,116 +123,63 @@ app.post("/api/score", async (req, res) => {
 // =====================================================
 
 app.get("/api/stats/:playerID/:carID", async (req, res) => {
-
   try {
-
     const playerID = req.params.playerID;
-    const carID = Number(req.params.carID);
+    const carID    = Number(req.params.carID);
 
-    // =====================================================
-    // GLOBAL BEST THIS CAR
-    // =====================================================
-
-    const globalBestThisCar = await collection.find({
-      carID
-    })
-    .sort({ distance: -1 })
-    .limit(1)
-    .toArray();
-
-    // =====================================================
-    // GLOBAL BEST OVERALL
-    // =====================================================
-
-    const globalBestOverall = await collection.find({})
-    .sort({ distance: -1 })
-    .limit(1)
-    .toArray();
-
-    // =====================================================
-    // PLAYER PERSONAL BEST (THIS CAR)
-    // =====================================================
-
-    const carPersonalBest = await collection.findOne({
-      playerID,
-      carID
-    });
-
-    // =====================================================
-    // PLAYER OVERALL BEST
-    // =====================================================
-
-    const overallPersonalBest = await collection.find({
-      playerID
-    })
-    .sort({ distance: -1 })
-    .limit(1)
-    .toArray();
-
-    // =====================================================
-    // PERSONAL BEST RANKS
-    // =====================================================
-
-    let distanceCarRank = null;
-    let distanceGlobalRank = null;
-
-    if (carPersonalBest)
-    {
-      const betterCarScores =
-        await collection.countDocuments({
-          carID,
-          distance: {
-            $gt: carPersonalBest.distance
-          }
-        });
-
-      distanceCarRank =
-        betterCarScores + 1;
-
-      const betterGlobalScores =
-        await collection.countDocuments({
-          distance: {
-            $gt: carPersonalBest.distance
-          }
-        });
-
-      distanceGlobalRank =
-        betterGlobalScores + 1;
+    // Global rank helper — tüm arabalara karşı
+    async function globalRank(dist) {
+      const better = await collection.countDocuments({ distance: { $gt: dist } });
+      return better + 1;
     }
 
+    // Paralel sorgular
+    const [
+      globalBestThisCarArr,
+      globalBestOverallArr,
+      carPersonalBest,
+      overallPersonalBestArr
+    ] = await Promise.all([
+      collection.find({ carID }).sort({ distance: -1 }).limit(1).toArray(),
+      collection.find({}).sort({ distance: -1 }).limit(1).toArray(),
+      collection.findOne({ playerID, carID }),
+      collection.find({ playerID }).sort({ distance: -1 }).limit(1).toArray()
+    ]);
+
+    const globalBestThisCar  = globalBestThisCarArr[0]  || null;
+    const globalBestOverall  = globalBestOverallArr[0]  || null;
+    const overallPersonalBest = overallPersonalBestArr[0] || null;
+
     // =====================================================
-    // RESPONSE
+    // RANKS — hepsi global
     // =====================================================
+
+    const [
+      carPersonalBestRank,
+      overallPersonalBestRank,
+      globalBestThisCarRank
+    ] = await Promise.all([
+      carPersonalBest   ? globalRank(carPersonalBest.distance)   : Promise.resolve(null),
+      overallPersonalBest ? globalRank(overallPersonalBest.distance) : Promise.resolve(null),
+      globalBestThisCar ? globalRank(globalBestThisCar.distance) : Promise.resolve(null)
+    ]);
 
     return res.json({
-
-      globalBestThisCar:
-        globalBestThisCar[0] || null,
-
-      globalBestOverall:
-        globalBestOverall[0] || null,
-
-      carPersonalBest:
-        carPersonalBest || null,
-
-      overallPersonalBest:
-        overallPersonalBest[0] || null,
-
+      globalBestThisCar,
+      globalBestOverall,
+      carPersonalBest,
+      overallPersonalBest,
       ranks: {
-
-        distanceCarRank,
-
-        distanceGlobalRank
+        carPersonalBestRank,       // carPersonalBest'in global rankı
+        overallPersonalBestRank,   // overallPersonalBest'in global rankı
+        globalBestThisCarRank,     // bu arabanın global #1'inin global rankı
+        globalBestOverallRank: 1   // her zaman #1
       }
     });
 
   } catch (err) {
-
     console.error("❌ /api/stats error:", err);
-
-    return res.status(500).json({
-      error: "Server error"
-    });
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
