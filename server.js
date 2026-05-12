@@ -65,105 +65,62 @@ initDatabase();
 
 app.post("/api/score", async (req, res) => {
   try {
+    const { playerID, playerName, carID, distance, topSpeed, avgSpeed } = req.body;
 
-    const {
-      playerID,
-      playerName,
-      carID,
-      distance,
-      topSpeed,
-      avgSpeed
-    } = req.body;
-
-    // ---------------- VALIDATION ----------------
-
-    if (
-      !playerID ||
-      !playerName ||
-      carID === undefined ||
-      distance === undefined
-    ) {
-      return res.status(400).json({
-        error: "Missing fields"
-      });
+    if (!playerID || !playerName || carID === undefined || distance === undefined) {
+      return res.status(400).json({ error: "Missing fields" });
     }
 
-    // Basit anti-cheat
     if (
-      distance < 0 ||
-      distance > 100000 ||
-      topSpeed < 0 ||
-      topSpeed > 700 ||
-      avgSpeed < 0 ||
-      avgSpeed > 700
+      distance < 0 || distance > 100000 ||
+      topSpeed < 0 || topSpeed > 700 ||
+      avgSpeed < 0 || avgSpeed > 700
     ) {
-      return res.status(400).json({
-        error: "Invalid score values"
-      });
+      return res.status(400).json({ error: "Invalid score values" });
     }
 
-    // ---------------- EXISTING SCORE ----------------
+    // ---- Rank hesaplama helper ----
+    async function calcRanks(dist, cID) {
+      const [carRank, globalRank] = await Promise.all([
+        collection.countDocuments({ carID: cID, distance: { $gt: dist } }),
+        collection.countDocuments({ distance: { $gt: dist } })
+      ]);
+      return {
+        distanceCarRank: carRank + 1,
+        distanceGlobalRank: globalRank + 1
+      };
+    }
 
-    const existing = await collection.findOne({
-      playerID,
-      carID
-    });
+    const existing = await collection.findOne({ playerID, carID });
 
-    // Yeni kayıt
     if (!existing) {
-
       await collection.insertOne({
-        playerID,
-        playerName,
-        carID,
-        distance,
-        topSpeed,
-        avgSpeed,
-        createdAt: new Date(),
-        lastUpdate: new Date()
+        playerID, playerName, carID,
+        distance, topSpeed, avgSpeed,
+        createdAt: new Date(), lastUpdate: new Date()
       });
 
-      return res.json({
-        ok: true,
-        message: "New score inserted"
-      });
+      const ranks = await calcRanks(distance, carID);
+      return res.json({ ok: true, message: "New score inserted", ranks });
     }
 
-    // Daha iyi skor geldiyse update
     if (distance > existing.distance) {
-
       await collection.updateOne(
         { playerID, carID },
-        {
-          $set: {
-            playerName,
-            distance,
-            topSpeed,
-            avgSpeed,
-            lastUpdate: new Date()
-          }
-        }
+        { $set: { playerName, distance, topSpeed, avgSpeed, lastUpdate: new Date() } }
       );
 
-      return res.json({
-        ok: true,
-        message: "Score updated"
-      });
+      const ranks = await calcRanks(distance, carID);
+      return res.json({ ok: true, message: "Score updated", ranks });
     }
 
-    // Daha kötü skor
-    return res.json({
-      ok: true,
-      message: "Score not improved"
-    });
+    // Daha kötü skor — yine de bu run'ın rankını döndür
+    const ranks = await calcRanks(distance, carID);
+    return res.json({ ok: true, message: "Score not improved", ranks });
 
   } catch (err) {
-
     console.error("❌ /api/score error:", err);
-
-    return res.status(500).json({
-      error: "Server error"
-    });
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
@@ -317,40 +274,6 @@ app.get("/api/leaderboard", async (_req, res) => {
     });
   }
 });
-
-// =====================================================
-// LATEST RANK
-// =====================================================
-
-app.post("/api/rank", async (req, res) => {
-
-  try {
-
-    const {
-      distance
-    } = req.body;
-
-    const betterScores =
-      await collection.countDocuments({
-        distance: {
-          $gt: distance
-        }
-      });
-
-    return res.json({
-      rank: betterScores + 1
-    });
-
-  } catch (err) {
-
-    console.error(err);
-
-    return res.status(500).json({
-      error: "Server error"
-    });
-  }
-});
-
 
 // =====================================================
 // ROOT
