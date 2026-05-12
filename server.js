@@ -319,6 +319,40 @@ app.get("/api/leaderboard", async (_req, res) => {
 });
 
 // =====================================================
+// LATEST RANK
+// =====================================================
+
+app.post("/api/rank", async (req, res) => {
+
+  try {
+
+    const {
+      distance
+    } = req.body;
+
+    const betterScores =
+      await collection.countDocuments({
+        distance: {
+          $gt: distance
+        }
+      });
+
+    return res.json({
+      rank: betterScores + 1
+    });
+
+  } catch (err) {
+
+    console.error(err);
+
+    return res.status(500).json({
+      error: "Server error"
+    });
+  }
+});
+
+
+// =====================================================
 // ROOT
 // =====================================================
 
