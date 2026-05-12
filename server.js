@@ -178,72 +178,100 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
     const playerID = req.params.playerID;
     const carID = Number(req.params.carID);
 
-    // ---------------- GLOBAL BEST (THIS CAR) ----------------
+    // =====================================================
+    // GLOBAL BEST THIS CAR
+    // =====================================================
 
-    const globalBest = await collection.find({
+    const globalBestThisCar = await collection.find({
       carID
     })
     .sort({ distance: -1 })
     .limit(1)
     .toArray();
 
-    // ---------------- PLAYER BEST (THIS CAR) ----------------
+    // =====================================================
+    // GLOBAL BEST OVERALL
+    // =====================================================
 
-    const personalBest = await collection.findOne({
+    const globalBestOverall = await collection.find({})
+    .sort({ distance: -1 })
+    .limit(1)
+    .toArray();
+
+    // =====================================================
+    // PLAYER PERSONAL BEST (THIS CAR)
+    // =====================================================
+
+    const carPersonalBest = await collection.findOne({
       playerID,
       carID
     });
 
-    // ---------------- PLAYER OVERALL BEST ----------------
+    // =====================================================
+    // PLAYER OVERALL BEST
+    // =====================================================
 
-    const overallBest = await collection.find({
+    const overallPersonalBest = await collection.find({
       playerID
     })
     .sort({ distance: -1 })
     .limit(1)
     .toArray();
 
-    // Eğer oyuncunun kaydı yoksa
-    if (!personalBest) {
+    // =====================================================
+    // PERSONAL BEST RANKS
+    // =====================================================
 
-      return res.json({
-        globalBest: globalBest[0] || null,
-        carPersonalBest: null,
-        overallPersonalBest: overallBest[0] || null,
-        ranks: null
-      });
+    let distanceCarRank = null;
+    let distanceGlobalRank = null;
+
+    if (carPersonalBest)
+    {
+      const betterCarScores =
+        await collection.countDocuments({
+          carID,
+          distance: {
+            $gt: carPersonalBest.distance
+          }
+        });
+
+      distanceCarRank =
+        betterCarScores + 1;
+
+      const betterGlobalScores =
+        await collection.countDocuments({
+          distance: {
+            $gt: carPersonalBest.distance
+          }
+        });
+
+      distanceGlobalRank =
+        betterGlobalScores + 1;
     }
 
-    // ---------------- RANKS ----------------
-
-    const betterCarScores = await collection.countDocuments({
-      carID,
-      distance: {
-        $gt: personalBest.distance
-      }
-    });
-
-    const betterGlobalScores = await collection.countDocuments({
-      distance: {
-        $gt: personalBest.distance
-      }
-    });
+    // =====================================================
+    // RESPONSE
+    // =====================================================
 
     return res.json({
 
-      globalBest: globalBest[0] || null,
+      globalBestThisCar:
+        globalBestThisCar[0] || null,
 
-      carPersonalBest: personalBest || null,
+      globalBestOverall:
+        globalBestOverall[0] || null,
 
-      overallPersonalBest: overallBest[0] || null,
+      carPersonalBest:
+        carPersonalBest || null,
+
+      overallPersonalBest:
+        overallPersonalBest[0] || null,
 
       ranks: {
 
-        distanceCarRank:
-          betterCarScores + 1,
+        distanceCarRank,
 
-        distanceGlobalRank:
-          betterGlobalScores + 1
+        distanceGlobalRank
       }
     });
 
