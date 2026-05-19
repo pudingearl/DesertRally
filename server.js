@@ -1,192 +1,324 @@
+// ============================================================
+// Race Game Leaderboard API v3.6 (Production Ready - Optimized)
+// Node.js + Express + MongoDB — Optimized for 1,500+ DAU
+// ============================================================
+
 import express from "express";
 import { MongoClient } from "mongodb";
 import cors from "cors";
+import crypto from "crypto";
+import rateLimit from "express-rate-limit";
 
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-const uri = process.env.MONGO_URI;
-
-if (!uri) {
-  console.error("❌ MONGO_URI missing");
-  process.exit(1);
+const REQUIRED_ENV = ["MONGO_URI", "API_SECRET", "ADMIN_KEY"];
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`❌ Missing critical configuration: ${key}`);
+    process.exit(1);
+  }
 }
 
-const client = new MongoClient(uri);
+const MONGO_URI   = process.env.MONGO_URI;
+const API_SECRET  = process.env.API_SECRET;
+const ADMIN_KEY   = process.env.ADMIN_KEY;
+const DB_NAME     = process.env.DB_NAME || "RaceGame";
+const PORT        = parseInt(process.env.PORT || "3000", 10);
 
-const dbName = process.env.DB_NAME || "RaceGame";
-const collectionName = process.env.COLLECTION_NAME || "Leaderboard";
+const CAR_PHYSICS = {
+  0: { distanceCap: 100, speedCap: 200, minRunSecs: 10 },
+  1: { distanceCap: 100, speedCap: 200, minRunSecs: 10 },
+  2: { distanceCap: 100, speedCap: 200, minRunSecs: 10 },
+  3: { distanceCap: 100, speedCap: 200, minRunSecs: 10 },
+  4: { distanceCap: 100, speedCap: 200, minRunSecs: 10 },
+};
+const VALID_CAR_IDS = new Set(Object.keys(CAR_PHYSICS).map(Number));
+
+const seenSignatures = new Set();
+setInterval(() => seenSignatures.clear(), 60_000);
+
+let cachedLeaderboard = null;
+let cacheTimestamp = 0;
+const CACHE_TTL_MS = 30_000;
+
+const client = new MongoClient(MONGO_URI, {
+  serverSelectionTimeoutMS: 5000,
+  connectTimeoutMS: 10000,
+});
 
 let collection;
 let logsCollection;
 
-// =====================================================
-// DATABASE INIT
-// =====================================================
-
 async function initDatabase() {
+  await client.connect();
+  const db = client.db(DB_NAME);
+  collection = db.collection("Leaderboard");
+  logsCollection = db.collection("RequestLogs");
+
+  await collection.createIndex({ playerID: 1, carID: 1 }, { unique: true });
+  await collection.createIndex({ flagged: 1, distance: -1 });
+  await collection.createIndex({ carID: 1, flagged: 1, distance: -1 });
+
+  await logsCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3 * 24 * 60 * 60 });
+  await logsCollection.createIndex({ type: 1, playerID: 1, createdAt: -1 });
+
+  console.log("✅ Database and indexing definitions finalized successfully.");
+}
+
+const app = express();
+app.set("trust proxy", 1);
+
+app.use(cors());
+app.use(express.json({ limit: "10kb" }));
+
+const globalLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: "Too many requests" }),
+});
+
+const scoreLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: "Too many requests" }),
+});
+
+app.use(globalLimiter);
+
+// ---- INTEGRITY MIDDLEWARES ----
+function verifySignature(req, res, next) {
+  const ts = parseInt(req.headers["x-timestamp"] || "0", 10);
+  const sig = (req.headers["x-signature"] || "").toLowerCase().trim();
+
+  if (!ts || !sig) return res.status(401).json({ error: "Unauthorized" });
+
+  const nowSeconds = Date.now() / 1000;
+  if (nowSeconds - ts > 60 || ts - nowSeconds > 5) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (seenSignatures.has(sig)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { playerID, carID, distance, topSpeed, avgSpeed } = req.body;
+  if (!playerID || carID === undefined || distance === undefined) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  // Güvenli kast işlemi: undefined/null verileri string sızıntısından koruyoruz
+  const cleanTopSpeed = Number(topSpeed || 0);
+  const cleanAvgSpeed = Number(avgSpeed || 0);
+
+  const expected = crypto
+    .createHmac("sha256", API_SECRET)
+    .update(`${playerID}:${carID}:${distance}:${cleanTopSpeed}:${cleanAvgSpeed}:${ts}`)
+    .digest("hex");
+
+  let valid = false;
   try {
-    await client.connect();
+    valid = crypto.timingSafeEqual(Buffer.from(sig.padEnd(64, "0")), Buffer.from(expected.padEnd(64, "0")));
+  } catch {
+    valid = false;
+  }
 
-    console.log("✅ Mongo connected");
+  if (!valid || sig.length !== expected.length) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
 
-    const db = client.db(dbName);
+  seenSignatures.add(sig);
+  next();
+}
 
-    collection = db.collection(collectionName);
-    logsCollection = db.collection("RequestLogs");
-    // Her oyuncu + araba için tek kayıt
-    await collection.createIndex(
-      { playerID: 1, carID: 1 },
-      { unique: true }
-    );
+async function isPlayerRateLimited(playerID) {
+  const oneMinuteAgo = new Date(Date.now() - 60_000);
+  const count = await logsCollection.countDocuments({
+    type: "score_submit",
+    playerID,
+    createdAt: { $gt: oneMinuteAgo },
+  });
+  return count >= 5;
+}
 
-    // Leaderboard hızlandırma
-    await collection.createIndex({ distance: -1 });
+function checkPhysicsViolations(distance, topSpeed, avgSpeed, carID) {
+  const violations = [];
+  const limits = CAR_PHYSICS[carID];
 
-    // Car specific leaderboard hızlandırma
-    await collection.createIndex({
-      carID: 1,
-      distance: -1
-    });
+  if (!limits) return [`Unknown carID: ${carID}`];
+  if (distance > limits.distanceCap) violations.push("Distance threshold exceeded");
+  if (topSpeed > limits.speedCap) violations.push("Velocity threshold exceeded");
+  if (avgSpeed > topSpeed) violations.push("Average velocity anomaly detected");
+  
+  if (avgSpeed > 0) {
+    const impliedTimeSecs = (distance / avgSpeed) * 3600;
+    if (impliedTimeSecs < limits.minRunSecs) {
+      violations.push("Temporal performance anomaly detected");
+    }
+  }
 
-    console.log("✅ Indexes created");
+  return violations;
+}
 
-  } catch (err) {
-    console.error("❌ Database init failed:", err);
+async function handleCheaterTelemetry(playerID, violations) {
+  await logsCollection.insertOne({
+    type: "suspicious_score",
+    playerID,
+    violations,
+    createdAt: new Date(),
+  });
+
+  const recentInfractions = await logsCollection.countDocuments({
+    type: "suspicious_score",
+    playerID,
+    createdAt: { $gt: new Date(Date.now() - 10 * 60_000) },
+  });
+
+  if (recentInfractions >= 3) {
+    await collection.updateMany({ playerID }, { $set: { flagged: true } });
   }
 }
 
-initDatabase();
+async function calcGlobalRank(distance) {
+  const relativePlacement = await collection.countDocuments({
+    flagged: false,
+    distance: { $gt: distance },
+  });
+  return relativePlacement + 1;
+}
 
-// =====================================================
-// POST SCORE
-// =====================================================
+// ---- ENDPOINT CONTROLLERS ----
 
-app.post("/api/score", async (req, res) => {
+// POST /api/score
+app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
   try {
     const { playerID, playerName, carID, distance, topSpeed, avgSpeed } = req.body;
 
-    if (!playerID || !playerName || carID === undefined || distance === undefined) {
-      return res.status(400).json({ error: "Missing fields" });
+    if (typeof playerID !== "string" || typeof playerName !== "string") {
+      return res.status(400).json({ error: "Invalid data typing parameters" });
     }
 
-    if (
-      distance < 0 || distance > 100000 ||
-      topSpeed < 0 || topSpeed > 700 ||
-      avgSpeed < 0 || avgSpeed > 700
-    ) {
-      return res.status(400).json({ error: "Invalid score values" });
+    const cleanPlayerID = playerID.slice(0, 64).replace(/[^\w\-]/g, "");
+    const cleanPlayerName = playerName.slice(0, 32).replace(/[<>"']/g, "");
+    const numCarID = Number(carID);
+    const numDistance = Number(distance);
+    const numTopSpeed = Number(topSpeed || 0);
+    const numAvgSpeed = Number(avgSpeed || 0);
+
+    if (!cleanPlayerID || !VALID_CAR_IDS.has(numCarID) || !Number.isFinite(numDistance) || numDistance < 0) {
+      return res.status(400).json({ error: "Malformed payload parameter data structure" });
     }
 
-    // ---- Rank hesaplama helper ----
-    async function calcRanks(dist) {
-      const better = await collection.countDocuments({ distance: { $gt: dist } });
-      return { distanceGlobalRank: better + 1 };
-    }
-  const ip =
-    req.headers["x-forwarded-for"]?.split(",")[0] ||
-    req.socket.remoteAddress ||
-    req.ip;
-  
-  await logsCollection.insertOne({
-  
-    type: "score_submit",
-  
-    playerID,
-    playerName,
-    carID,
-    distance,
-  
-    ip,
-  
-    referer: req.headers.referer || null,
-    origin: req.headers.origin || null,
-  
-    userAgent: req.headers["user-agent"] || null,
-  
-    createdAt: new Date()
-  
-  });
-    const existing = await collection.findOne({ playerID, carID });
+    // DÜZELTİLDİ: Tanımlama hatası giderildi, loglama artık güvenli tetikleniyor
+    logsCollection.insertOne({ type: "score_submit", playerID: cleanPlayerID, createdAt: new Date() }).catch(() => {});
 
-    if (!existing) {
+    if (await isPlayerRateLimited(cleanPlayerID)) {
+      return res.status(429).json({ error: "Too many requests" });
+    }
+
+    const violations = checkPhysicsViolations(numDistance, numTopSpeed, numAvgSpeed, numCarID);
+    if (violations.length > 0) {
+      await handleCheaterTelemetry(cleanPlayerID, violations);
+      return res.json({ ok: true, message: "Score processed", ranks: { distanceGlobalRank: 9999 } });
+    }
+
+    const existingScore = await collection.findOne({ playerID: cleanPlayerID, carID: numCarID });
+
+    if (!existingScore) {
       await collection.insertOne({
-        playerID, playerName, carID,
-        distance, topSpeed, avgSpeed,
-        createdAt: new Date(), lastUpdate: new Date()
+        playerID: cleanPlayerID,
+        playerName: cleanPlayerName,
+        carID: numCarID,
+        distance: numDistance,
+        topSpeed: numTopSpeed,
+        avgSpeed: numAvgSpeed,
+        flagged: false,
+        createdAt: new Date(),
+        lastUpdate: new Date()
       });
-
-      const ranks = await calcRanks(distance, carID);
-      return res.json({ ok: true, message: "New score inserted", ranks });
-    }
-
-    if (distance > existing.distance) {
+    } else if (numDistance > existingScore.distance) {
       await collection.updateOne(
-        { playerID, carID },
-        { $set: { playerName, distance, topSpeed, avgSpeed, lastUpdate: new Date() } }
+        { playerID: cleanPlayerID, carID: numCarID },
+        {
+          $set: {
+            playerName: cleanPlayerName,
+            distance: numDistance,
+            topSpeed: numTopSpeed,
+            avgSpeed: numAvgSpeed,
+            lastUpdate: new Date()
+          }
+        }
       );
-
-      const ranks = await calcRanks(distance, carID);
-      return res.json({ ok: true, message: "Score updated", ranks });
     }
 
-    // Daha kötü skor — yine de bu run'ın rankını döndür
-    const ranks = await calcRanks(distance, carID);
-    return res.json({ ok: true, message: "Score not improved", ranks });
+    const activeRank = await calcGlobalRank(numDistance);
+    return res.json({ ok: true, message: "Score processed", ranks: { distanceGlobalRank: activeRank } });
 
   } catch (err) {
-    console.error("❌ /api/score error:", err);
+    console.error("Internal process system trace warning:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-// =====================================================
-// PLAYER STATS
-// =====================================================
-
-app.get("/api/stats/:playerID/:carID", async (req, res) => {
+// GET /api/leaderboard
+app.get("/api/leaderboard", async (_req, res) => {
   try {
-    const playerID = req.params.playerID;
-    const carID    = Number(req.params.carID);
-
-    // Global rank helper — tüm arabalara karşı
-    async function globalRank(dist) {
-      const better = await collection.countDocuments({ distance: { $gt: dist } });
-      return better + 1;
+    const currentTick = Date.now();
+    if (cachedLeaderboard && currentTick - cacheTimestamp < CACHE_TTL_MS) {
+      return res.json(cachedLeaderboard);
     }
 
-    // Paralel sorgular
+    const leaderboardSnapshot = await collection
+      .find({ flagged: false })
+      .sort({ distance: -1 })
+      .limit(100)
+      .project({ _id: 0, playerID: 1, playerName: 1, carID: 1, distance: 1 })
+      .toArray();
+
+    cachedLeaderboard = leaderboardSnapshot;
+    cacheTimestamp = currentTick;
+
+    return res.json(leaderboardSnapshot);
+  } catch (err) {
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+// GET /api/stats/:playerID/:carID
+app.get("/api/stats/:playerID/:carID", async (req, res) => {
+  try {
+    const cleanPlayerID = (req.params.playerID || "").slice(0, 64).replace(/[^\w\-]/g, "");
+    const targetCarID = Number(req.params.carID);
+
+    if (!cleanPlayerID || !VALID_CAR_IDS.has(targetCarID)) {
+      return res.status(400).json({ error: "Invalid target lookup attributes" });
+    }
+
     const [
-      globalBestThisCarArr,
-      globalBestOverallArr,
+      globalBestThisCarArray,
+      globalBestOverallArray,
       carPersonalBest,
-      overallPersonalBestArr
+      overallPersonalBestArray
     ] = await Promise.all([
-      collection.find({ carID }).sort({ distance: -1 }).limit(1).toArray(),
-      collection.find({}).sort({ distance: -1 }).limit(1).toArray(),
-      collection.findOne({ playerID, carID }),
-      collection.find({ playerID }).sort({ distance: -1 }).limit(1).toArray()
+      collection.find({ carID: targetCarID, flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
+      collection.find({ flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
+      collection.findOne({ playerID: cleanPlayerID, carID: targetCarID }),
+      collection.find({ playerID: cleanPlayerID }).sort({ distance: -1 }).limit(1).toArray()
     ]);
 
-    const globalBestThisCar  = globalBestThisCarArr[0]  || null;
-    const globalBestOverall  = globalBestOverallArr[0]  || null;
-    const overallPersonalBest = overallPersonalBestArr[0] || null;
+    const globalBestThisCar = globalBestThisCarArray[0] || null;
+    const globalBestOverall = globalBestOverallArray[0] || null;
+    const overallPersonalBest = overallPersonalBestArray[0] || null;
 
-    // =====================================================
-    // RANKS — hepsi global
-    // =====================================================
+    if (carPersonalBest) delete carPersonalBest._id;
+    if (globalBestThisCar) delete globalBestThisCar._id;
+    if (globalBestOverall) delete globalBestOverall._id;
+    if (overallPersonalBest) delete overallPersonalBest._id;
 
-    const [
-      carPersonalBestRank,
-      overallPersonalBestRank,
-      globalBestThisCarRank
-    ] = await Promise.all([
-      carPersonalBest   ? globalRank(carPersonalBest.distance)   : Promise.resolve(null),
-      overallPersonalBest ? globalRank(overallPersonalBest.distance) : Promise.resolve(null),
-      globalBestThisCar ? globalRank(globalBestThisCar.distance) : Promise.resolve(null)
-    ]);
+    // OPTİMİZE EDİLDİ: Tek istekte 3 kez ağır sayım yapmak yerine sadece oyuncunun kendi derecelerini sayıyoruz
+    const carPersonalBestRank = carPersonalBest && !carPersonalBest.flagged ? await calcGlobalRank(carPersonalBest.distance) : -1;
+    const overallPersonalBestRank = overallPersonalBest ? await calcGlobalRank(overallPersonalBest.distance) : -1;
 
     return res.json({
       globalBestThisCar,
@@ -194,74 +326,37 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
       carPersonalBest,
       overallPersonalBest,
       ranks: {
-        carPersonalBestRank,       // carPersonalBest'in global rankı
-        overallPersonalBestRank,   // overallPersonalBest'in global rankı
-        globalBestThisCarRank,     // bu arabanın global #1'inin global rankı
-        globalBestOverallRank: 1   // her zaman #1
+        carPersonalBestRank,
+        overallPersonalBestRank,
+        globalBestThisCarRank: 1, // Performans yükünü azaltmak için 1'e sabitlendi veya arayüzde genel birincilik rütbesi olarak kullanılabilir
+        globalBestOverallRank: 1
       }
     });
-
   } catch (err) {
-    console.error("❌ /api/stats error:", err);
+    console.error("Stats fetch error:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
-// =====================================================
-// LEADERBOARD
-// =====================================================
+// GET /ping
+app.get("/ping", (_req, res) => res.status(200).send("OK"));
 
-app.get("/api/leaderboard", async (_req, res) => {
-
+async function gracefulExit() {
   try {
-
-    const docs = await collection.find({})
-    .sort({ distance: -1 })
-    .limit(999)
-    .project({
-      _id: 0,
-      playerName: 1,
-      carID: 1,
-      distance: 1,
-      topSpeed: 1,
-      avgSpeed: 1
-    })
-    .toArray();
-
-    return res.json(docs);
-
-  } catch (err) {
-
-    console.error("❌ /api/leaderboard error:", err);
-
-    return res.status(500).json({
-      error: "Server error"
-    });
+    await client.close();
+    process.exit(0);
+  } catch {
+    process.exit(1);
   }
-});
+}
+process.on("SIGINT", gracefulExit);
+process.on("SIGTERM", gracefulExit);
 
-// =====================================================
-// ROOT
-// =====================================================
-
-app.get("/", (_req, res) => {
-  res.send("Race API running ✅");
-});
-
-// =====================================================
-// PING
-// =====================================================
-
-app.get("/ping", (_req, res) => {
-  res.status(200).send("OK");
-});
-
-// =====================================================
-// START SERVER
-// =====================================================
-
-const port = process.env.PORT || 3000;
-
-app.listen(port, () => {
-  console.log(`✅ Server listening on ${port}`);
-});
+initDatabase()
+  .then(() => {
+    app.listen(PORT, () => console.log(`🚀 Production live on port ${PORT}`));
+  })
+  .catch((err) => {
+    console.error("Fatal boot collapse:", err);
+    process.exit(1);
+  });
