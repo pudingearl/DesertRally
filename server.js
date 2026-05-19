@@ -20,6 +20,7 @@ const dbName = process.env.DB_NAME || "RaceGame";
 const collectionName = process.env.COLLECTION_NAME || "Leaderboard";
 
 let collection;
+let logsCollection;
 
 // =====================================================
 // DATABASE INIT
@@ -34,7 +35,7 @@ async function initDatabase() {
     const db = client.db(dbName);
 
     collection = db.collection(collectionName);
-
+    logsCollection = db.collection("RequestLogs");
     // Her oyuncu + araba için tek kayıt
     await collection.createIndex(
       { playerID: 1, carID: 1 },
@@ -84,7 +85,30 @@ app.post("/api/score", async (req, res) => {
       const better = await collection.countDocuments({ distance: { $gt: dist } });
       return { distanceGlobalRank: better + 1 };
     }
-
+  const ip =
+    req.headers["x-forwarded-for"]?.split(",")[0] ||
+    req.socket.remoteAddress ||
+    req.ip;
+  
+  await logsCollection.insertOne({
+  
+    type: "score_submit",
+  
+    playerID,
+    playerName,
+    carID,
+    distance,
+  
+    ip,
+  
+    referer: req.headers.referer || null,
+    origin: req.headers.origin || null,
+  
+    userAgent: req.headers["user-agent"] || null,
+  
+    createdAt: new Date()
+  
+  });
     const existing = await collection.findOne({ playerID, carID });
 
     if (!existing) {
