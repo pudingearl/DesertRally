@@ -108,9 +108,15 @@ function verifySignature(req, res, next) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  // ✅ FIX: JSON parse'dan gelen values'ı direkt string olarak kullan (precision kaybını önle)
-  // Client'deki .ToString("G17") ile tam precision korunuyor
-  const messageToSign = `${playerID}:${carID}:${distance}:${topSpeed}:${avgSpeed}:${ts}`;
+  // 🛠️ ESKİ HALİ:
+  // const messageToSign = `${playerID}:${carID}:${distance}:${topSpeed}:${avgSpeed}:${ts}`;
+  
+  // ✅ YENİ HALİ:
+  const numDistance = Number(distance);
+  const numTopSpeed = Number(topSpeed || 0);
+  const numAvgSpeed = Number(avgSpeed || 0);
+  
+  const messageToSign = `${playerID}:${carID}:${numDistance.toFixed(4)}:${numTopSpeed.toFixed(4)}:${numAvgSpeed.toFixed(4)}:${ts}`;
   
   const expected = crypto
     .createHmac("sha256", API_SECRET)
