@@ -108,30 +108,22 @@ function verifySignature(req, res, next) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
-  // Güvenli kast işlemi: undefined/null verileri string sızıntısından koruyoruz
-  const cleanTopSpeed = topSpeed !== undefined && topSpeed !== null ? Number(topSpeed) : 0;
-  const cleanAvgSpeed = avgSpeed !== undefined && avgSpeed !== null ? Number(avgSpeed) : 0;
-
-  // ✅ FIX: Float'ları string'e dönüştür (client'in toString() davranışını match et)
-  const topSpeedStr = cleanTopSpeed.toString();
-  const avgSpeedStr = cleanAvgSpeed.toString();
-
-  // 🔍 DEBUG LOG
-  const messageToSign = `${playerID}:${carID}:${distance}:${topSpeedStr}:${avgSpeedStr}:${ts}`;
+  // ✅ FIX: JSON parse'dan gelen values'ı direkt string olarak kullan (precision kaybını önle)
+  // Client'deki .ToString("G17") ile tam precision korunuyor
+  const messageToSign = `${playerID}:${carID}:${distance}:${topSpeed}:${avgSpeed}:${ts}`;
   
   const expected = crypto
     .createHmac("sha256", API_SECRET)
     .update(messageToSign)
     .digest("hex");
 
-  console.log("🔍 [SIGNATURE VERIFICATION DEBUG]");
-  console.log(`  API_SECRET (FULL): ${API_SECRET}`);
-  console.log(`  API_SECRET (length): ${API_SECRET.length}`);
-  console.log(`  Received signature: ${sig}`);
-  console.log(`  Expected signature: ${expected}`);
-  console.log(`  Message to sign: ${messageToSign}`);
-  console.log(`  Sig length: ${sig.length}, Expected length: ${expected.length}`);
-  console.log(`  Timestamp (server): ${Math.floor(Date.now() / 1000)}, Received: ${ts}`);
+  // 🔍 DEBUG: İmza karşılaştırması
+  if (sig !== expected) {
+    console.log("❌ [SIGNATURE MISMATCH]");
+    console.log(`  Message: ${messageToSign}`);
+    console.log(`  Received: ${sig}`);
+    console.log(`  Expected: ${expected}`);
+  }
 
   let valid = false;
   try {
@@ -141,8 +133,6 @@ function verifySignature(req, res, next) {
     console.log(`  Buffer conversion error: ${err.message}`);
     valid = false;
   }
-
-  console.log(`  Result: ${valid ? "✅ VALID" : "❌ INVALID"}\n`);
 
   if (!valid) {
     return res.status(401).json({ error: "Unauthorized" });
