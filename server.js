@@ -109,22 +109,27 @@ function verifySignature(req, res, next) {
   }
 
   // Güvenli kast işlemi: undefined/null verileri string sızıntısından koruyoruz
-  const cleanTopSpeed = Number(topSpeed || 0);
-  const cleanAvgSpeed = Number(avgSpeed || 0);
+  const cleanTopSpeed = topSpeed !== undefined && topSpeed !== null ? Number(topSpeed) : 0;
+  const cleanAvgSpeed = avgSpeed !== undefined && avgSpeed !== null ? Number(avgSpeed) : 0;
+
+  // ✅ FIX: Float'ları string'e dönüştür (client'in toString() davranışını match et)
+  const topSpeedStr = cleanTopSpeed.toString();
+  const avgSpeedStr = cleanAvgSpeed.toString();
 
   const expected = crypto
     .createHmac("sha256", API_SECRET)
-    .update(`${playerID}:${carID}:${distance}:${cleanTopSpeed}:${cleanAvgSpeed}:${ts}`)
+    .update(`${playerID}:${carID}:${distance}:${topSpeedStr}:${avgSpeedStr}:${ts}`)
     .digest("hex");
 
   let valid = false;
   try {
-    valid = crypto.timingSafeEqual(Buffer.from(sig.padEnd(64, "0")), Buffer.from(expected.padEnd(64, "0")));
+    // ✅ FIX: padEnd yerine doğrudan hex buffer karşılaştırması yap
+    valid = sig.length === expected.length && crypto.timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"));
   } catch {
     valid = false;
   }
 
-  if (!valid || sig.length !== expected.length) {
+  if (!valid) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
