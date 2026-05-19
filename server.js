@@ -111,14 +111,12 @@ function verifySignature(req, res, next) {
   // 🛠️ ESKİ HALİ:
   // const messageToSign = `${playerID}:${carID}:${distance}:${topSpeed}:${avgSpeed}:${ts}`;
   
-  // ✅ YENİ HALİ:
   const numDistance = Number(distance);
   const numTopSpeed = Number(topSpeed || 0);
   const numAvgSpeed = Number(avgSpeed || 0);
   
-  // Unity ile BİREBİR aynı düz birleştirme formatı (iki nokta olmadan):
-  // ✅ DOĞRU HALİ (Sondaki çift $ işaretinden biri silindi):
-  const messageToSign = `${playerID}${carID}${numDistance.toFixed(4)}${numTopSpeed.toFixed(4)}${numAvgSpeed.toFixed(4)}${ts}`;
+  // Unity ile BİREBİR aynı ayraçlı format:
+  const messageToSign = `${playerID}-${carID}-${numDistance.toFixed(4)}-${numTopSpeed.toFixed(4)}-${numAvgSpeed.toFixed(4)}-${ts}`;
   // Gizli anahtarı kesinlikle temizle:
   const cleanSecret = String(API_SECRET).trim();
   
