@@ -116,10 +116,13 @@ function verifySignature(req, res, next) {
   const numTopSpeed = Number(topSpeed || 0);
   const numAvgSpeed = Number(avgSpeed || 0);
   
-  const messageToSign = `${playerID}:${carID}:${numDistance.toFixed(4)}:${numTopSpeed.toFixed(4)}:${numAvgSpeed.toFixed(4)}:${ts}`;
+  // Unity ile BİREBİR aynı düz birleştirme formatı (iki nokta olmadan):
+  const messageToSign = `${playerID}${carID}${numDistance.toFixed(4)}${numTopSpeed.toFixed(4)}${numAvgSpeed.toFixed(4)}$${ts}`;  
+  // Gizli anahtarı kesinlikle temizle:
+  const cleanSecret = String(API_SECRET).trim();
   
   const expected = crypto
-    .createHmac("sha256", API_SECRET)
+    .createHmac("sha256", cleanSecret)
     .update(messageToSign)
     .digest("hex");
 
