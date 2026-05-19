@@ -32,6 +32,17 @@ const CAR_PHYSICS = {
 };
 const VALID_CAR_IDS = new Set(Object.keys(CAR_PHYSICS).map(Number));
 
+const activeAdTokens = new Map();
+ 
+// Bellek temizliği: her 10 dakikada süresi dolmuş tokenları sil.
+// (Map büyük oyuncu sayılarında şişmesin diye)
+setInterval(() => {
+  const now = Date.now();
+  for (const [playerID, data] of activeAdTokens) {
+    if (now > data.expiresAt) activeAdTokens.delete(playerID);
+  }
+}, 10 * 60_000);
+
 const seenSignatures = new Set();
 setInterval(() => seenSignatures.clear(), 60_000);
 
@@ -277,6 +288,48 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
     console.error("Internal process system trace warning:", err);
     return res.status(500).json({ error: "Server error" });
   }
+});
+
+// GET /api/ad-token/:playerID
+// Unity istemcisi reklam göstermeden önce bu endpoint'i çağırır.
+// Sunucu rastgele, tek kullanımlık ve 3 dakika geçerli bir token üretir.
+app.get("/api/ad-token/:playerID", (req, res) => {
+  const cleanPlayerID = (req.params.playerID || "").slice(0, 64).replace(/[^\w\-]/g, "");
+  if (!cleanPlayerID) return res.status(400).json({ error: "Invalid playerID" });
+ 
+  const token     = crypto.randomBytes(16).toString("hex");
+  const expiresAt = Date.now() + 3 * 60_000; // 3 dakika
+ 
+  // Oyuncu başına tek token — önceki token varsa üzerine yaz
+  activeAdTokens.set(cleanPlayerID, { token, expiresAt });
+ 
+  return res.json({ adToken: token });
+});
+// POST /api/ad-verify
+// Reklam tamamlandıktan sonra Unity token'ı bu endpoint'e gönderir.
+// Sunucu token'ı doğrular, tek kullanımlıktır — başarılı doğrulamadan
+// sonra hemen silinir.
+app.post("/api/ad-verify", (req, res) => {
+  const { playerID, adToken } = req.body;
+ 
+  if (!playerID || !adToken) {
+    return res.status(400).json({ ok: false, error: "Missing fields" });
+  }
+ 
+  const cleanPlayerID = String(playerID).slice(0, 64).replace(/[^\w\-]/g, "");
+  const savedData     = activeAdTokens.get(cleanPlayerID);
+ 
+  // Token yoksa, eşleşmiyorsa veya süresi dolduysa: 403
+  if (!savedData || savedData.token !== adToken || Date.now() > savedData.expiresAt) {
+    console.warn(`[ad-verify] ❌ Geçersiz token — playerID: ${cleanPlayerID}`);
+    return res.status(403).json({ ok: false, error: "Invalid or expired ad token", action: "BOZ" });
+  }
+ 
+  // Token tek kullanımlık — başarılı doğrulamadan sonra sil
+  activeAdTokens.delete(cleanPlayerID);
+ 
+  console.log(`[ad-verify] ✅ Token doğrulandı — playerID: ${cleanPlayerID}`);
+  return res.json({ ok: true });
 });
 
 // GET /api/leaderboard
