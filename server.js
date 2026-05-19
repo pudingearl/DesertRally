@@ -217,7 +217,7 @@ app.get("/api/leaderboard", async (_req, res) => {
 
     const docs = await collection.find({})
     .sort({ distance: -1 })
-    .limit(9999)
+    .limit(999)
     .project({
       _id: 0,
       playerName: 1,
