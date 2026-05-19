@@ -116,18 +116,33 @@ function verifySignature(req, res, next) {
   const topSpeedStr = cleanTopSpeed.toString();
   const avgSpeedStr = cleanAvgSpeed.toString();
 
+  // 🔍 DEBUG LOG
+  const apiSecretPreview = API_SECRET.substring(0, 10) + "***";
+  const messageToSign = `${playerID}:${carID}:${distance}:${topSpeedStr}:${avgSpeedStr}:${ts}`;
+  
   const expected = crypto
     .createHmac("sha256", API_SECRET)
-    .update(`${playerID}:${carID}:${distance}:${topSpeedStr}:${avgSpeedStr}:${ts}`)
+    .update(messageToSign)
     .digest("hex");
+
+  console.log("🔍 [SIGNATURE VERIFICATION DEBUG]");
+  console.log(`  API_SECRET (preview): ${apiSecretPreview}`);
+  console.log(`  Received signature: ${sig.substring(0, 16)}...`);
+  console.log(`  Expected signature: ${expected.substring(0, 16)}...`);
+  console.log(`  Message to sign: ${messageToSign}`);
+  console.log(`  Sig length: ${sig.length}, Expected length: ${expected.length}`);
+  console.log(`  Timestamp (server): ${Math.floor(Date.now() / 1000)}, Received: ${ts}`);
 
   let valid = false;
   try {
     // ✅ FIX: padEnd yerine doğrudan hex buffer karşılaştırması yap
     valid = sig.length === expected.length && crypto.timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"));
-  } catch {
+  } catch (err) {
+    console.log(`  Buffer conversion error: ${err.message}`);
     valid = false;
   }
+
+  console.log(`  Result: ${valid ? "✅ VALID" : "❌ INVALID"}\n`);
 
   if (!valid) {
     return res.status(401).json({ error: "Unauthorized" });
