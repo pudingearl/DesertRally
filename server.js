@@ -117,7 +117,8 @@ function verifySignature(req, res, next) {
   const numAvgSpeed = Number(avgSpeed || 0);
   
   // Unity ile BİREBİR aynı düz birleştirme formatı (iki nokta olmadan):
-  const messageToSign = `${playerID}${carID}${numDistance.toFixed(4)}${numTopSpeed.toFixed(4)}${numAvgSpeed.toFixed(4)}$${ts}`;  
+  // ✅ DOĞRU HALİ (Sondaki çift $ işaretinden biri silindi):
+  const messageToSign = `${playerID}${carID}${numDistance.toFixed(4)}${numTopSpeed.toFixed(4)}${numAvgSpeed.toFixed(4)}${ts}`;
   // Gizli anahtarı kesinlikle temizle:
   const cleanSecret = String(API_SECRET).trim();
   
