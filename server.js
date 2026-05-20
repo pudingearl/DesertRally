@@ -9,7 +9,7 @@ import cors from "cors";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 
-const REQUIRED_ENV = ["MONGO_URI", "API_SECRET", "ADMIN_KEY"];
+const REQUIRED_ENV = ["MONGO_URI", "API_SECRET", "ADMIN_KEY", "REWARDED_AD_UNIT"];
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
     console.error(`❌ Missing critical configuration: ${key}`);
@@ -17,11 +17,12 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
-const MONGO_URI   = process.env.MONGO_URI;
-const API_SECRET  = process.env.API_SECRET;
-const ADMIN_KEY   = process.env.ADMIN_KEY;
-const DB_NAME     = process.env.DB_NAME || "RaceGame";
-const PORT        = parseInt(process.env.PORT || "3000", 10);
+const MONGO_URI       = process.env.MONGO_URI;
+const API_SECRET      = process.env.API_SECRET;
+const ADMIN_KEY       = process.env.ADMIN_KEY;
+const REWARDED_AD_UNIT = process.env.REWARDED_AD_UNIT;
+const DB_NAME         = process.env.DB_NAME || "RaceGame";
+const PORT            = parseInt(process.env.PORT || "3000", 10);
 
 const CAR_PHYSICS = {
   0: { distanceCap: 100, speedCap: 200, minRunSecs: 10 },
@@ -330,6 +331,17 @@ app.post("/api/ad-verify", (req, res) => {
  
   console.log(`[ad-verify] ✅ Token doğrulandı — playerID: ${cleanPlayerID}`);
   return res.json({ ok: true });
+});
+
+// GET /api/ad-config
+// AdMob reklam yapılandırması — oyun başında çekilir
+app.get("/api/ad-config", (_req, res) => {
+  try {
+    return res.json({ rewardedAdUnit: REWARDED_AD_UNIT });
+  } catch (err) {
+    console.error("Ad config fetch error:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
 });
 
 // GET /api/leaderboard
