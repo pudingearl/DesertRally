@@ -1,6 +1,6 @@
 // ============================================================
-// Race Game Leaderboard API v3.6 (Production Ready - Optimized)
-// Node.js + Express + MongoDB — Optimized for 1,500+ DAU
+// Race Game Leaderboard API v3.6
+// Node.js + Express + MongoDB
 // ============================================================
 
 import express from "express";
@@ -9,20 +9,24 @@ import cors from "cors";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 
+// ---- ENV VALIDATION ----
+
 const REQUIRED_ENV = ["MONGO_URI", "API_SECRET", "ADMIN_KEY", "REWARDED_AD_UNIT"];
 for (const key of REQUIRED_ENV) {
   if (!process.env[key]) {
-    console.error(`❌ Missing critical configuration: ${key}`);
+    console.error(`Missing required env: ${key}`);
     process.exit(1);
   }
 }
 
-const MONGO_URI       = process.env.MONGO_URI;
-const API_SECRET      = process.env.API_SECRET;
-const ADMIN_KEY       = process.env.ADMIN_KEY;
+const MONGO_URI        = process.env.MONGO_URI;
+const API_SECRET       = process.env.API_SECRET;
+const ADMIN_KEY        = process.env.ADMIN_KEY;
 const REWARDED_AD_UNIT = process.env.REWARDED_AD_UNIT;
-const DB_NAME         = process.env.DB_NAME || "RaceGame";
-const PORT            = parseInt(process.env.PORT || "3000", 10);
+const DB_NAME          = process.env.DB_NAME || "RaceGame";
+const PORT             = parseInt(process.env.PORT || "3000", 10);
+
+// ---- CONSTANTS ----
 
 const CAR_PHYSICS = {
   0: { distanceCap: 100, speedCap: 200, minRunSecs: 10 },
@@ -33,10 +37,12 @@ const CAR_PHYSICS = {
 };
 const VALID_CAR_IDS = new Set(Object.keys(CAR_PHYSICS).map(Number));
 
+// ---- IN-MEMORY STATE ----
+
 const activeAdTokens = new Map();
- 
-// Bellek temizliği: her 10 dakikada süresi dolmuş tokenları sil.
-// (Map büyük oyuncu sayılarında şişmesin diye)
+const seenSignatures = new Set();
+
+// Süresi dolmuş ad tokenlarını 10 dakikada bir temizle
 setInterval(() => {
   const now = Date.now();
   for (const [playerID, data] of activeAdTokens) {
@@ -44,12 +50,16 @@ setInterval(() => {
   }
 }, 10 * 60_000);
 
-const seenSignatures = new Set();
+// Replay saldırılarına karşı imza setini dakikada bir sıfırla
 setInterval(() => seenSignatures.clear(), 60_000);
 
+// ---- LEADERBOARD CACHE ----
+
 let cachedLeaderboard = null;
-let cacheTimestamp = 0;
-const CACHE_TTL_MS = 30_000;
+let cacheTimestamp    = 0;
+const CACHE_TTL_MS    = 30_000;
+
+// ---- DATABASE ----
 
 const client = new MongoClient(MONGO_URI, {
   serverSelectionTimeoutMS: 5000,
@@ -58,108 +68,38 @@ const client = new MongoClient(MONGO_URI, {
 
 let collection;
 let logsCollection;
+let countsCollection;
 
 async function initDatabase() {
   await client.connect();
   const db = client.db(DB_NAME);
-  collection = db.collection("Leaderboard");
-  logsCollection = db.collection("RequestLogs");
+
+  collection      = db.collection("Leaderboard");
+  logsCollection  = db.collection("RequestLogs");
+  countsCollection = db.collection("RequestCounts");
 
   await collection.createIndex({ playerID: 1, carID: 1 }, { unique: true });
   await collection.createIndex({ flagged: 1, distance: -1 });
   await collection.createIndex({ carID: 1, flagged: 1, distance: -1 });
 
+  // RequestLogs: 3 günlük TTL, detaylı istek geçmişi
   await logsCollection.createIndex({ createdAt: 1 }, { expireAfterSeconds: 3 * 24 * 60 * 60 });
   await logsCollection.createIndex({ type: 1, playerID: 1, createdAt: -1 });
 
-  console.log("✅ Database and indexing definitions finalized successfully.");
+  // RequestCounts: kalıcı, endpoint başına toplam sayaç
+  await countsCollection.createIndex({ endpoint: 1 }, { unique: true });
+
+  console.log("Database ready.");
 }
 
-const app = express();
-app.set("trust proxy", 1);
+// ---- HELPERS ----
 
-app.use(cors());
-app.use(express.json({ limit: "10kb" }));
-
-const globalLimiter = rateLimit({
-  windowMs: 60_000,
-  max: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (_req, res) => res.status(429).json({ error: "Too many requests" }),
-});
-
-const scoreLimiter = rateLimit({
-  windowMs: 60_000,
-  max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (_req, res) => res.status(429).json({ error: "Too many requests" }),
-});
-
-app.use(globalLimiter);
-
-// ---- INTEGRITY MIDDLEWARES ----
-function verifySignature(req, res, next) {
-  const ts = parseInt(req.headers["x-timestamp"] || "0", 10);
-  const sig = (req.headers["x-signature"] || "").toLowerCase().trim();
-
-  if (!ts || !sig) return res.status(401).json({ error: "Unauthorized" });
-
-  const nowSeconds = Date.now() / 1000;
-  if (nowSeconds - ts > 60 || ts - nowSeconds > 5) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  if (seenSignatures.has(sig)) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  const { playerID, carID, distance, topSpeed, avgSpeed } = req.body;
-  if (!playerID || carID === undefined || distance === undefined) {
-    return res.status(400).json({ error: "Missing required fields" });
-  }
-
-  // 🛠️ ESKİ HALİ:
-  // const messageToSign = `${playerID}:${carID}:${distance}:${topSpeed}:${avgSpeed}:${ts}`;
-  
-  const numDistance = Number(distance);
-  const numTopSpeed = Number(topSpeed || 0);
-  const numAvgSpeed = Number(avgSpeed || 0);
-  
-  // Unity ile BİREBİR aynı ayraçlı format:
-  const messageToSign = `${playerID}-${carID}-${numDistance.toFixed(4)}-${numTopSpeed.toFixed(4)}-${numAvgSpeed.toFixed(4)}-${ts}`;
-  // Gizli anahtarı kesinlikle temizle:
-  const cleanSecret = String(API_SECRET).trim();
-  
-  const expected = crypto
-    .createHmac("sha256", cleanSecret)
-    .update(messageToSign)
-    .digest("hex");
-
-  // 🔍 DEBUG: İmza karşılaştırması
-  if (sig !== expected) {
-    console.log("❌ [SIGNATURE MISMATCH]");
-    console.log(`  Message: ${messageToSign}`);
-    console.log(`  Received: ${sig}`);
-    console.log(`  Expected: ${expected}`);
-  }
-
-  let valid = false;
-  try {
-    // ✅ FIX: padEnd yerine doğrudan hex buffer karşılaştırması yap
-    valid = sig.length === expected.length && crypto.timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"));
-  } catch (err) {
-    console.log(`  Buffer conversion error: ${err.message}`);
-    valid = false;
-  }
-
-  if (!valid) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  seenSignatures.add(sig);
-  next();
+async function calcGlobalRank(distance) {
+  const above = await collection.countDocuments({
+    flagged: false,
+    distance: { $gt: distance },
+  });
+  return above + 1;
 }
 
 async function isPlayerRateLimited(playerID) {
@@ -178,9 +118,9 @@ function checkPhysicsViolations(distance, topSpeed, avgSpeed, carID) {
 
   if (!limits) return [`Unknown carID: ${carID}`];
   if (distance > limits.distanceCap) violations.push("Distance threshold exceeded");
-  if (topSpeed > limits.speedCap) violations.push("Velocity threshold exceeded");
-  if (avgSpeed > topSpeed) violations.push("Average velocity anomaly detected");
-  
+  if (topSpeed > limits.speedCap)    violations.push("Velocity threshold exceeded");
+  if (avgSpeed > topSpeed)           violations.push("Average velocity anomaly detected");
+
   if (avgSpeed > 0) {
     const impliedTimeSecs = (distance / avgSpeed) * 3600;
     if (impliedTimeSecs < limits.minRunSecs) {
@@ -210,15 +150,140 @@ async function handleCheaterTelemetry(playerID, violations) {
   }
 }
 
-async function calcGlobalRank(distance) {
-  const relativePlacement = await collection.countDocuments({
-    flagged: false,
-    distance: { $gt: distance },
+// ---- APP ----
+
+const app = express();
+app.set("trust proxy", 1);
+app.use(cors());
+app.use(express.json({ limit: "10kb" }));
+
+// ---- RATE LIMITERS ----
+
+const globalLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: "Too many requests" }),
+});
+
+const scoreLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => res.status(429).json({ error: "Too many requests" }),
+});
+
+app.use(globalLimiter);
+
+// ---- REQUEST LOGGING MIDDLEWARE ----
+// Tüm endpoint'leri yakalar. res.finish üzerinden tetiklenir,
+// bu yüzden rate limit'e (429) takılan istekler de dahil her şey loglanır.
+
+function logRequest(req, res, next) {
+  const startTime = Date.now();
+
+  res.on("finish", () => {
+    const endpoint    = `${req.method} ${req.route?.path || req.path}`;
+    const durationMs  = Date.now() - startTime;
+    const rawPlayerID = req.body?.playerID || req.params?.playerID || null;
+    const playerID    = rawPlayerID
+      ? String(rawPlayerID).slice(0, 64).replace(/[^\w\-]/g, "")
+      : null;
+
+    // Detaylı log — 3 günde TTL ile silinir
+    logsCollection
+      .insertOne({
+        type: "request",
+        method: req.method,
+        path: req.path,
+        endpoint,
+        statusCode: res.statusCode,
+        playerID,
+        ip: req.ip,
+        durationMs,
+        createdAt: new Date(),
+      })
+      .catch(() => {});
+
+    // Kalıcı sayaç — endpoint ve status code'a göre ayrıştırılmış
+    countsCollection
+      .updateOne(
+        { endpoint },
+        {
+          $inc: {
+            total: 1,
+            [`byStatus.s${res.statusCode}`]: 1,
+          },
+          $set: { lastSeenAt: new Date() },
+          $setOnInsert: { firstSeenAt: new Date() },
+        },
+        { upsert: true }
+      )
+      .catch(() => {});
   });
-  return relativePlacement + 1;
+
+  next();
 }
 
-// ---- ENDPOINT CONTROLLERS ----
+app.use(logRequest);
+
+// ---- SIGNATURE MIDDLEWARE ----
+
+function verifySignature(req, res, next) {
+  const ts  = parseInt(req.headers["x-timestamp"] || "0", 10);
+  const sig = (req.headers["x-signature"] || "").toLowerCase().trim();
+
+  if (!ts || !sig) return res.status(401).json({ error: "Unauthorized" });
+
+  const nowSeconds = Date.now() / 1000;
+  if (nowSeconds - ts > 60 || ts - nowSeconds > 5) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (seenSignatures.has(sig)) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const { playerID, carID, distance, topSpeed, avgSpeed } = req.body;
+  if (!playerID || carID === undefined || distance === undefined) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  const numDistance = Number(distance);
+  const numTopSpeed = Number(topSpeed || 0);
+  const numAvgSpeed = Number(avgSpeed || 0);
+
+  // Unity istemcisiyle birebir eşleşen format
+  const messageToSign = `${playerID}-${carID}-${numDistance.toFixed(4)}-${numTopSpeed.toFixed(4)}-${numAvgSpeed.toFixed(4)}-${ts}`;
+  const cleanSecret   = String(API_SECRET).trim();
+
+  const expected = crypto
+    .createHmac("sha256", cleanSecret)
+    .update(messageToSign)
+    .digest("hex");
+
+  if (sig !== expected) {
+    console.log("[signature] mismatch:", { messageToSign, received: sig, expected });
+  }
+
+  let valid = false;
+  try {
+    valid =
+      sig.length === expected.length &&
+      crypto.timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"));
+  } catch (err) {
+    console.log("[signature] buffer error:", err.message);
+  }
+
+  if (!valid) return res.status(401).json({ error: "Unauthorized" });
+
+  seenSignatures.add(sig);
+  next();
+}
+
+// ---- ENDPOINTS ----
 
 // POST /api/score
 app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
@@ -229,19 +294,21 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
       return res.status(400).json({ error: "Invalid data typing parameters" });
     }
 
-    const cleanPlayerID = playerID.slice(0, 64).replace(/[^\w\-]/g, "");
+    const cleanPlayerID   = playerID.slice(0, 64).replace(/[^\w\-]/g, "");
     const cleanPlayerName = playerName.slice(0, 32).replace(/[<>"']/g, "");
-    const numCarID = Number(carID);
-    const numDistance = Number(distance);
-    const numTopSpeed = Number(topSpeed || 0);
-    const numAvgSpeed = Number(avgSpeed || 0);
+    const numCarID        = Number(carID);
+    const numDistance     = Number(distance);
+    const numTopSpeed     = Number(topSpeed || 0);
+    const numAvgSpeed     = Number(avgSpeed || 0);
 
     if (!cleanPlayerID || !VALID_CAR_IDS.has(numCarID) || !Number.isFinite(numDistance) || numDistance < 0) {
       return res.status(400).json({ error: "Malformed payload parameter data structure" });
     }
 
-    // DÜZELTİLDİ: Tanımlama hatası giderildi, loglama artık güvenli tetikleniyor
-    logsCollection.insertOne({ type: "score_submit", playerID: cleanPlayerID, createdAt: new Date() }).catch(() => {});
+    // Oyuncu başına rate limit kontrolü için score_submit logu
+    logsCollection
+      .insertOne({ type: "score_submit", playerID: cleanPlayerID, createdAt: new Date() })
+      .catch(() => {});
 
     if (await isPlayerRateLimited(cleanPlayerID)) {
       return res.status(429).json({ error: "Too many requests" });
@@ -265,7 +332,7 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
         avgSpeed: numAvgSpeed,
         flagged: false,
         createdAt: new Date(),
-        lastUpdate: new Date()
+        lastUpdate: new Date(),
       });
     } else if (numDistance > existingScore.distance) {
       await collection.updateOne(
@@ -276,8 +343,8 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
             distance: numDistance,
             topSpeed: numTopSpeed,
             avgSpeed: numAvgSpeed,
-            lastUpdate: new Date()
-          }
+            lastUpdate: new Date(),
+          },
         }
       );
     }
@@ -286,84 +353,72 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
     return res.json({ ok: true, message: "Score processed", ranks: { distanceGlobalRank: activeRank } });
 
   } catch (err) {
-    console.error("Internal process system trace warning:", err);
+    console.error("[score] error:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
 // GET /api/ad-token/:playerID
-// Unity istemcisi reklam göstermeden önce bu endpoint'i çağırır.
-// Sunucu rastgele, tek kullanımlık ve 3 dakika geçerli bir token üretir.
+// Reklam göstermeden önce çağrılır. Tek kullanımlık, 3 dakika geçerli token üretir.
 app.get("/api/ad-token/:playerID", (req, res) => {
   const cleanPlayerID = (req.params.playerID || "").slice(0, 64).replace(/[^\w\-]/g, "");
   if (!cleanPlayerID) return res.status(400).json({ error: "Invalid playerID" });
- 
+
   const token     = crypto.randomBytes(16).toString("hex");
-  const expiresAt = Date.now() + 3 * 60_000; // 3 dakika
- 
-  // Oyuncu başına tek token — önceki token varsa üzerine yaz
+  const expiresAt = Date.now() + 3 * 60_000;
+
   activeAdTokens.set(cleanPlayerID, { token, expiresAt });
- 
   return res.json({ adToken: token });
 });
+
 // POST /api/ad-verify
-// Reklam tamamlandıktan sonra Unity token'ı bu endpoint'e gönderir.
-// Sunucu token'ı doğrular, tek kullanımlıktır — başarılı doğrulamadan
-// sonra hemen silinir.
+// Reklam tamamlandıktan sonra token doğrulanır ve tek kullanım garantisi için silinir.
 app.post("/api/ad-verify", (req, res) => {
   const { playerID, adToken } = req.body;
- 
+
   if (!playerID || !adToken) {
     return res.status(400).json({ ok: false, error: "Missing fields" });
   }
- 
+
   const cleanPlayerID = String(playerID).slice(0, 64).replace(/[^\w\-]/g, "");
   const savedData     = activeAdTokens.get(cleanPlayerID);
- 
-  // Token yoksa, eşleşmiyorsa veya süresi dolduysa: 403
+
   if (!savedData || savedData.token !== adToken || Date.now() > savedData.expiresAt) {
-    console.warn(`[ad-verify] ❌ Geçersiz token — playerID: ${cleanPlayerID}`);
+    console.warn("[ad-verify] invalid token:", cleanPlayerID);
     return res.status(403).json({ ok: false, error: "Invalid or expired ad token", action: "BOZ" });
   }
- 
-  // Token tek kullanımlık — başarılı doğrulamadan sonra sil
+
   activeAdTokens.delete(cleanPlayerID);
- 
-  console.log(`[ad-verify] ✅ Token doğrulandı — playerID: ${cleanPlayerID}`);
+  console.log("[ad-verify] token verified:", cleanPlayerID);
   return res.json({ ok: true });
 });
 
 // GET /api/ad-config
-// AdMob reklam yapılandırması — oyun başında çekilir
 app.get("/api/ad-config", (_req, res) => {
-  try {
-    return res.json({ rewardedAdUnit: REWARDED_AD_UNIT });
-  } catch (err) {
-    console.error("Ad config fetch error:", err);
-    return res.status(500).json({ error: "Server error" });
-  }
+  return res.json({ rewardedAdUnit: REWARDED_AD_UNIT });
 });
 
 // GET /api/leaderboard
 app.get("/api/leaderboard", async (_req, res) => {
   try {
-    const currentTick = Date.now();
-    if (cachedLeaderboard && currentTick - cacheTimestamp < CACHE_TTL_MS) {
+    const now = Date.now();
+    if (cachedLeaderboard && now - cacheTimestamp < CACHE_TTL_MS) {
       return res.json(cachedLeaderboard);
     }
 
-    const leaderboardSnapshot = await collection
+    const snapshot = await collection
       .find({ flagged: false })
       .sort({ distance: -1 })
       .limit(100)
       .project({ _id: 0, playerID: 1, playerName: 1, carID: 1, distance: 1 })
       .toArray();
 
-    cachedLeaderboard = leaderboardSnapshot;
-    cacheTimestamp = currentTick;
+    cachedLeaderboard = snapshot;
+    cacheTimestamp    = now;
 
-    return res.json(leaderboardSnapshot);
+    return res.json(snapshot);
   } catch (err) {
+    console.error("[leaderboard] error:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
@@ -372,7 +427,7 @@ app.get("/api/leaderboard", async (_req, res) => {
 app.get("/api/stats/:playerID/:carID", async (req, res) => {
   try {
     const cleanPlayerID = (req.params.playerID || "").slice(0, 64).replace(/[^\w\-]/g, "");
-    const targetCarID = Number(req.params.carID);
+    const targetCarID   = Number(req.params.carID);
 
     if (!cleanPlayerID || !VALID_CAR_IDS.has(targetCarID)) {
       return res.status(400).json({ error: "Invalid target lookup attributes" });
@@ -382,26 +437,27 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
       globalBestThisCarArray,
       globalBestOverallArray,
       carPersonalBest,
-      overallPersonalBestArray
+      overallPersonalBestArray,
     ] = await Promise.all([
       collection.find({ carID: targetCarID, flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
       collection.find({ flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
       collection.findOne({ playerID: cleanPlayerID, carID: targetCarID }),
-      collection.find({ playerID: cleanPlayerID }).sort({ distance: -1 }).limit(1).toArray()
+      collection.find({ playerID: cleanPlayerID }).sort({ distance: -1 }).limit(1).toArray(),
     ]);
 
-    const globalBestThisCar = globalBestThisCarArray[0] || null;
-    const globalBestOverall = globalBestOverallArray[0] || null;
+    const globalBestThisCar  = globalBestThisCarArray[0]  || null;
+    const globalBestOverall  = globalBestOverallArray[0]  || null;
     const overallPersonalBest = overallPersonalBestArray[0] || null;
 
-    if (carPersonalBest) delete carPersonalBest._id;
-    if (globalBestThisCar) delete globalBestThisCar._id;
-    if (globalBestOverall) delete globalBestOverall._id;
+    if (carPersonalBest)    delete carPersonalBest._id;
+    if (globalBestThisCar)  delete globalBestThisCar._id;
+    if (globalBestOverall)  delete globalBestOverall._id;
     if (overallPersonalBest) delete overallPersonalBest._id;
 
-    // OPTİMİZE EDİLDİ: Tek istekte 3 kez ağır sayım yapmak yerine sadece oyuncunun kendi derecelerini sayıyoruz
-    const carPersonalBestRank = carPersonalBest && !carPersonalBest.flagged ? await calcGlobalRank(carPersonalBest.distance) : -1;
-    const overallPersonalBestRank = overallPersonalBest ? await calcGlobalRank(overallPersonalBest.distance) : -1;
+    const carPersonalBestRank     = carPersonalBest && !carPersonalBest.flagged
+      ? await calcGlobalRank(carPersonalBest.distance) : -1;
+    const overallPersonalBestRank = overallPersonalBest
+      ? await calcGlobalRank(overallPersonalBest.distance) : -1;
 
     return res.json({
       globalBestThisCar,
@@ -411,18 +467,36 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
       ranks: {
         carPersonalBestRank,
         overallPersonalBestRank,
-        globalBestThisCarRank: 1, // Performans yükünü azaltmak için 1'e sabitlendi veya arayüzde genel birincilik rütbesi olarak kullanılabilir
-        globalBestOverallRank: 1
-      }
+        globalBestThisCarRank: 1,
+        globalBestOverallRank: 1,
+      },
     });
   } catch (err) {
-    console.error("Stats fetch error:", err);
+    console.error("[stats] error:", err);
+    return res.status(500).json({ error: "Server error" });
+  }
+});
+
+// GET /admin/stats
+// Endpoint başına toplam istek sayılarını ve status code dağılımını döner.
+app.get("/admin/stats", async (req, res) => {
+  if (req.headers["x-admin-key"] !== ADMIN_KEY) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  try {
+    const rows = await countsCollection.find({}).sort({ total: -1 }).toArray();
+    return res.json(rows);
+  } catch (err) {
+    console.error("[admin/stats] error:", err);
     return res.status(500).json({ error: "Server error" });
   }
 });
 
 // GET /ping
 app.get("/ping", (_req, res) => res.status(200).send("OK"));
+
+// ---- SHUTDOWN ----
 
 async function gracefulExit() {
   try {
@@ -435,11 +509,11 @@ async function gracefulExit() {
 process.on("SIGINT", gracefulExit);
 process.on("SIGTERM", gracefulExit);
 
+// ---- BOOT ----
+
 initDatabase()
-  .then(() => {
-    app.listen(PORT, () => console.log(`🚀 Production live on port ${PORT}`));
-  })
+  .then(() => app.listen(PORT, () => console.log(`Server running on port ${PORT}`)))
   .catch((err) => {
-    console.error("Fatal boot collapse:", err);
+    console.error("Fatal boot error:", err);
     process.exit(1);
   });
