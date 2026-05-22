@@ -182,6 +182,8 @@ app.use(globalLimiter);
 // bu yüzden rate limit'e (429) takılan istekler de dahil her şey loglanır.
 
 function logRequest(req, res, next) {
+  if (req.path === "/ping") return next();
+
   const startTime = Date.now();
 
   res.on("finish", () => {
@@ -192,30 +194,28 @@ function logRequest(req, res, next) {
       ? String(rawPlayerID).slice(0, 64).replace(/[^\w\-]/g, "")
       : null;
 
-    // Detaylı log — 3 günde TTL ile silinir
     logsCollection
       .insertOne({
-        type: "request",
-        method: req.method,
-        path: req.path,
+        type:       "request",
+        method:     req.method,
+        path:       req.path,
         endpoint,
         statusCode: res.statusCode,
         playerID,
-        ip: req.ip,
+        ip:         req.ip,
         durationMs,
-        createdAt: new Date(),
+        userAgent:  req.headers["user-agent"] || null,
+        origin:     req.headers["origin"]     || null,
+        referer:    req.headers["referer"]    || null,
+        createdAt:  new Date(),
       })
       .catch(() => {});
 
-    // Kalıcı sayaç — endpoint ve status code'a göre ayrıştırılmış
     countsCollection
       .updateOne(
         { endpoint },
         {
-          $inc: {
-            total: 1,
-            [`byStatus.s${res.statusCode}`]: 1,
-          },
+          $inc: { total: 1, [`byStatus.s${res.statusCode}`]: 1 },
           $set: { lastSeenAt: new Date() },
           $setOnInsert: { firstSeenAt: new Date() },
         },
