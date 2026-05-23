@@ -458,6 +458,8 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
       ? await calcGlobalRank(carPersonalBest.distance) : -1;
     const overallPersonalBestRank = overallPersonalBest
       ? await calcGlobalRank(overallPersonalBest.distance) : -1;
+    const globalBestThisCarRank = globalBestThisCar
+      ? await calcGlobalRank(globalBestThisCar.distance) : -1;
 
     return res.json({
       globalBestThisCar,
@@ -467,7 +469,7 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
       ranks: {
         carPersonalBestRank,
         overallPersonalBestRank,
-        globalBestThisCarRank: 1,
+        globalBestThisCarRank,
         globalBestOverallRank: 1,
       },
     });
