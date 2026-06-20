@@ -1,5 +1,5 @@
 // ============================================================
-// Race Game Leaderboard API v3.6
+// Race Game Leaderboard API v4.0
 // Node.js + Express + MongoDB
 // ============================================================
 
@@ -55,8 +55,8 @@ setInterval(() => seenSignatures.clear(), 60_000);
 
 // ---- LEADERBOARD CACHE ----
 
-let cachedLeaderboard = null;
-let cacheTimestamp    = 0;
+// Level bazlı önbellek: levelID -> { data: [], timestamp: 0 }
+const cachedLeaderboards = new Map(); 
 const CACHE_TTL_MS    = 30_000;
 
 // ---- DATABASE ----
@@ -78,7 +78,8 @@ async function initDatabase() {
   logsCollection  = db.collection("RequestLogs");
   countsCollection = db.collection("RequestCounts");
 
-  await collection.createIndex({ playerID: 1, carID: 1 }, { unique: true });
+  // Yeni level mimarisine uygun indexleme
+  await collection.createIndex({ playerID: 1, carID: 1, levelID: 1 }, { unique: true });
   await collection.createIndex({ flagged: 1, distance: -1 });
   await collection.createIndex({ carID: 1, flagged: 1, distance: -1 });
 
@@ -94,8 +95,9 @@ async function initDatabase() {
 
 // ---- HELPERS ----
 
-async function calcGlobalRank(distance) {
+async function calcGlobalRank(distance, levelID) {
   const above = await collection.countDocuments({
+    levelID: levelID,
     flagged: false,
     distance: { $gt: distance },
   });
@@ -178,8 +180,6 @@ const scoreLimiter = rateLimit({
 app.use(globalLimiter);
 
 // ---- REQUEST LOGGING MIDDLEWARE ----
-// Tüm endpoint'leri yakalar. res.finish üzerinden tetiklenir,
-// bu yüzden rate limit'e (429) takılan istekler de dahil her şey loglanır.
 
 function logRequest(req, res, next) {
   if (req.path === "/ping") return next();
@@ -246,17 +246,16 @@ function verifySignature(req, res, next) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { playerID, carID, distance, topSpeed, avgSpeed } = req.body;
-  if (!playerID || carID === undefined || distance === undefined) {
+  const { playerID, carID, levelID, distance, topSpeed, avgSpeed } = req.body;
+  if (!playerID || carID === undefined || distance === undefined || levelID === undefined) {
     return res.status(400).json({ error: "Missing required fields" });
   }
-
+  const numLevelID = Number(levelID);
   const numDistance = Number(distance);
   const numTopSpeed = Number(topSpeed || 0);
   const numAvgSpeed = Number(avgSpeed || 0);
 
-  // Unity istemcisiyle birebir eşleşen format
-  const messageToSign = `${playerID}-${carID}-${numDistance.toFixed(4)}-${numTopSpeed.toFixed(4)}-${numAvgSpeed.toFixed(4)}-${ts}`;
+  const messageToSign = `${playerID}-${carID}-${numLevelID}-${numDistance.toFixed(4)}-${numTopSpeed.toFixed(4)}-${numAvgSpeed.toFixed(4)}-${ts}`;
   const cleanSecret   = String(API_SECRET).trim();
 
   const expected = crypto
@@ -285,10 +284,16 @@ function verifySignature(req, res, next) {
 
 // ---- ENDPOINTS ----
 
+// GET /api/new-player
+app.get("/api/new-player", (req, res) => {
+  const tag = Math.floor(100000 + Math.random() * 900000).toString();
+  return res.json({ tag });
+});
+
 // POST /api/score
 app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
   try {
-    const { playerID, playerName, carID, distance, topSpeed, avgSpeed } = req.body;
+    const { playerID, playerName, carID, levelID, distance, topSpeed, avgSpeed } = req.body;
 
     if (typeof playerID !== "string" || typeof playerName !== "string") {
       return res.status(400).json({ error: "Invalid data typing parameters" });
@@ -297,15 +302,15 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
     const cleanPlayerID   = playerID.slice(0, 64).replace(/[^\w\-]/g, "");
     const cleanPlayerName = playerName.slice(0, 32).replace(/[<>"']/g, "");
     const numCarID        = Number(carID);
+    const numLevelID      = Number(levelID);
     const numDistance     = Number(distance);
     const numTopSpeed     = Number(topSpeed || 0);
     const numAvgSpeed     = Number(avgSpeed || 0);
 
-    if (!cleanPlayerID || !VALID_CAR_IDS.has(numCarID) || !Number.isFinite(numDistance) || numDistance < 0) {
+    if (!cleanPlayerID || !VALID_CAR_IDS.has(numCarID) || isNaN(numLevelID) || !Number.isFinite(numDistance) || numDistance < 0) {
       return res.status(400).json({ error: "Malformed payload parameter data structure" });
     }
 
-    // Oyuncu başına rate limit kontrolü için score_submit logu
     logsCollection
       .insertOne({ type: "score_submit", playerID: cleanPlayerID, createdAt: new Date() })
       .catch(() => {});
@@ -320,13 +325,14 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
       return res.json({ ok: true, message: "Score processed", ranks: { distanceGlobalRank: 9999 } });
     }
 
-    const existingScore = await collection.findOne({ playerID: cleanPlayerID, carID: numCarID });
+    const existingScore = await collection.findOne({ playerID: cleanPlayerID, carID: numCarID, levelID: numLevelID });
 
     if (!existingScore) {
       await collection.insertOne({
         playerID: cleanPlayerID,
         playerName: cleanPlayerName,
         carID: numCarID,
+        levelID: numLevelID,
         distance: numDistance,
         topSpeed: numTopSpeed,
         avgSpeed: numAvgSpeed,
@@ -336,7 +342,7 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
       });
     } else if (numDistance > existingScore.distance) {
       await collection.updateOne(
-        { playerID: cleanPlayerID, carID: numCarID },
+        { playerID: cleanPlayerID, carID: numCarID, levelID: numLevelID },
         {
           $set: {
             playerName: cleanPlayerName,
@@ -349,7 +355,7 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
       );
     }
 
-    const activeRank = await calcGlobalRank(numDistance);
+    const activeRank = await calcGlobalRank(numDistance, numLevelID);
     return res.json({ ok: true, message: "Score processed", ranks: { distanceGlobalRank: activeRank } });
 
   } catch (err) {
@@ -359,7 +365,6 @@ app.post("/api/score", scoreLimiter, verifySignature, async (req, res) => {
 });
 
 // GET /api/ad-token/:playerID
-// Reklam göstermeden önce çağrılır. Tek kullanımlık, 3 dakika geçerli token üretir.
 app.get("/api/ad-token/:playerID", (req, res) => {
   const cleanPlayerID = (req.params.playerID || "").slice(0, 64).replace(/[^\w\-]/g, "");
   if (!cleanPlayerID) return res.status(400).json({ error: "Invalid playerID" });
@@ -372,7 +377,6 @@ app.get("/api/ad-token/:playerID", (req, res) => {
 });
 
 // POST /api/ad-verify
-// Reklam tamamlandıktan sonra token doğrulanır ve tek kullanım garantisi için silinir.
 app.post("/api/ad-verify", (req, res) => {
   const { playerID, adToken } = req.body;
 
@@ -398,23 +402,27 @@ app.get("/api/ad-config", (_req, res) => {
   return res.json({ rewardedAdUnit: REWARDED_AD_UNIT });
 });
 
-// GET /api/leaderboard
-app.get("/api/leaderboard", async (_req, res) => {
+// GET /api/leaderboard/:levelID
+app.get("/api/leaderboard/:levelID", async (req, res) => {
   try {
+    const numLevelID = Number(req.params.levelID);
+    if (isNaN(numLevelID)) return res.status(400).json({ error: "Invalid level ID" });
+
     const now = Date.now();
-    if (cachedLeaderboard && now - cacheTimestamp < CACHE_TTL_MS) {
-      return res.json(cachedLeaderboard);
+    const cache = cachedLeaderboards.get(numLevelID);
+
+    if (cache && now - cache.timestamp < CACHE_TTL_MS) {
+      return res.json(cache.data);
     }
 
     const snapshot = await collection
-      .find({ flagged: false })
+      .find({ levelID: numLevelID, flagged: false })
       .sort({ distance: -1 })
       .limit(100)
       .project({ _id: 0, playerID: 1, playerName: 1, carID: 1, distance: 1 })
       .toArray();
 
-    cachedLeaderboard = snapshot;
-    cacheTimestamp    = now;
+    cachedLeaderboards.set(numLevelID, { data: snapshot, timestamp: now });
 
     return res.json(snapshot);
   } catch (err) {
@@ -423,13 +431,15 @@ app.get("/api/leaderboard", async (_req, res) => {
   }
 });
 
-// GET /api/stats/:playerID/:carID
-app.get("/api/stats/:playerID/:carID", async (req, res) => {
+
+// GET /api/stats/:playerID/:carID/:levelID
+app.get("/api/stats/:playerID/:carID/:levelID", async (req, res) => {
   try {
     const cleanPlayerID = (req.params.playerID || "").slice(0, 64).replace(/[^\w\-]/g, "");
     const targetCarID   = Number(req.params.carID);
+    const targetLevelID = Number(req.params.levelID);
 
-    if (!cleanPlayerID || !VALID_CAR_IDS.has(targetCarID)) {
+    if (!cleanPlayerID || !VALID_CAR_IDS.has(targetCarID) || isNaN(targetLevelID)) {
       return res.status(400).json({ error: "Invalid target lookup attributes" });
     }
 
@@ -439,10 +449,10 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
       carPersonalBest,
       overallPersonalBestArray,
     ] = await Promise.all([
-      collection.find({ carID: targetCarID, flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
-      collection.find({ flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
-      collection.findOne({ playerID: cleanPlayerID, carID: targetCarID }),
-      collection.find({ playerID: cleanPlayerID }).sort({ distance: -1 }).limit(1).toArray(),
+      collection.find({ carID: targetCarID, levelID: targetLevelID, flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
+      collection.find({ levelID: targetLevelID, flagged: false }).sort({ distance: -1 }).limit(1).toArray(),
+      collection.findOne({ playerID: cleanPlayerID, carID: targetCarID, levelID: targetLevelID }),
+      collection.find({ playerID: cleanPlayerID, levelID: targetLevelID }).sort({ distance: -1 }).limit(1).toArray(),
     ]);
 
     const globalBestThisCar  = globalBestThisCarArray[0]  || null;
@@ -455,11 +465,11 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
     if (overallPersonalBest) delete overallPersonalBest._id;
 
     const carPersonalBestRank     = carPersonalBest && !carPersonalBest.flagged
-      ? await calcGlobalRank(carPersonalBest.distance) : -1;
+      ? await calcGlobalRank(carPersonalBest.distance, targetLevelID) : -1;
     const overallPersonalBestRank = overallPersonalBest
-      ? await calcGlobalRank(overallPersonalBest.distance) : -1;
+      ? await calcGlobalRank(overallPersonalBest.distance, targetLevelID) : -1;
     const globalBestThisCarRank = globalBestThisCar
-      ? await calcGlobalRank(globalBestThisCar.distance) : -1;
+      ? await calcGlobalRank(globalBestThisCar.distance, targetLevelID) : -1;
 
     return res.json({
       globalBestThisCar,
@@ -480,7 +490,6 @@ app.get("/api/stats/:playerID/:carID", async (req, res) => {
 });
 
 // GET /admin/stats
-// Endpoint başına toplam istek sayılarını ve status code dağılımını döner.
 app.get("/admin/stats", async (req, res) => {
   if (req.headers["x-admin-key"] !== ADMIN_KEY) {
     return res.status(403).json({ error: "Forbidden" });
