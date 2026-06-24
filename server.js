@@ -32,8 +32,8 @@ const CAR_PHYSICS = {
   0: { distanceCap: 100000, speedCap: 300, minRunSecs: 3 },
   1: { distanceCap: 100000, speedCap: 300, minRunSecs: 3 },
   2: { distanceCap: 100000, speedCap: 300, minRunSecs: 3 },
-  3: { distanceCap: 100000, speedCap: 300, minRunSecs: 3 },
-  4: { distanceCap: 100000, speedCap: 300, minRunSecs: 3 },
+  3: { distanceCap: 100000, speedCap: 350, minRunSecs: 3 },
+  4: { distanceCap: 100000, speedCap: 400, minRunSecs: 3 },
 };
 const VALID_CAR_IDS = new Set(Object.keys(CAR_PHYSICS).map(Number));
 
