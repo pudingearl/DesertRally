@@ -163,7 +163,7 @@ app.use(express.json({ limit: "10kb" }));
 
 const globalLimiter = rateLimit({
   windowMs: 60_000,
-  max: 60,
+  max: 250,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (_req, res) => res.status(429).json({ error: "Too many requests" }),
