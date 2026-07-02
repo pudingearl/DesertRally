@@ -281,21 +281,6 @@ function verifySignature(req, res, next) {
   next();
 }
 
-  let valid = false;
-  try {
-    valid =
-      sig.length === expected.length &&
-      crypto.timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"));
-  } catch (err) {
-    console.log("[signature] buffer error:", err.message);
-  }
-
-  if (!valid) return res.status(401).json({ error: "Unauthorized" });
-
-  seenSignatures.add(sig);
-  next();
-}
-
 // ---- ENDPOINTS ----
 
 // GET /api/new-player
@@ -390,8 +375,8 @@ app.get("/api/ad-token/:playerID", (req, res) => {
   return res.json({ adToken: token });
 });
 
-// POST /api/ad-verify
-app.post("/api/ad-verify", (req, res) => {
+// POST /api/ad-
+app.post("/api/ad-", (req, res) => {
   const { playerID, adToken } = req.body;
 
   if (!playerID || !adToken) {
@@ -402,12 +387,12 @@ app.post("/api/ad-verify", (req, res) => {
   const savedData     = activeAdTokens.get(cleanPlayerID);
 
   if (!savedData || savedData.token !== adToken || Date.now() > savedData.expiresAt) {
-    console.warn("[ad-verify] invalid token:", cleanPlayerID);
+    console.warn("[ad-] invalid token:", cleanPlayerID);
     return res.status(403).json({ ok: false, error: "Invalid or expired ad token", action: "BOZ" });
   }
 
   activeAdTokens.delete(cleanPlayerID);
-  console.log("[ad-verify] token verified:", cleanPlayerID);
+  console.log("[ad-] token verified:", cleanPlayerID);
   return res.json({ ok: true });
 });
 
