@@ -375,8 +375,8 @@ app.get("/api/ad-token/:playerID", (req, res) => {
   return res.json({ adToken: token });
 });
 
-// POST /api/ad-
-app.post("/api/ad-", (req, res) => {
+// POST /api/ad-verify
+app.post("/api/ad-verify", (req, res) => {
   const { playerID, adToken } = req.body;
 
   if (!playerID || !adToken) {
@@ -387,12 +387,12 @@ app.post("/api/ad-", (req, res) => {
   const savedData     = activeAdTokens.get(cleanPlayerID);
 
   if (!savedData || savedData.token !== adToken || Date.now() > savedData.expiresAt) {
-    console.warn("[ad-] invalid token:", cleanPlayerID);
+    console.warn("[ad-verify] invalid token:", cleanPlayerID);
     return res.status(403).json({ ok: false, error: "Invalid or expired ad token", action: "BOZ" });
   }
 
   activeAdTokens.delete(cleanPlayerID);
-  console.log("[ad-] token verified:", cleanPlayerID);
+  console.log("[ad-verify] token verified:", cleanPlayerID);
   return res.json({ ok: true });
 });
 
