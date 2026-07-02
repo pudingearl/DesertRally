@@ -250,22 +250,36 @@ function verifySignature(req, res, next) {
   if (!playerID || carID === undefined || distance === undefined || levelID === undefined) {
     return res.status(400).json({ error: "Missing required fields" });
   }
+
   const numLevelID = Number(levelID);
   const numDistance = Number(distance);
   const numTopSpeed = Number(topSpeed || 0);
   const numAvgSpeed = Number(avgSpeed || 0);
+  const cleanSecret = String(API_SECRET).trim();
 
-  const messageToSign = `${playerID}-${carID}-${numLevelID}-${numDistance.toFixed(4)}-${numTopSpeed.toFixed(4)}-${numAvgSpeed.toFixed(4)}-${ts}`;
-  const cleanSecret   = String(API_SECRET).trim();
+  // 1. Yeni Yöntem (Integer/Mikro Yöntemi)
+  const messageNew = `${playerID}-${carID}-${numLevelID}-${Math.round(numDistance * 10000)}-${Math.round(numTopSpeed * 10000)}-${Math.round(numAvgSpeed * 10000)}-${ts}`;
+  const expectedNew = crypto.createHmac("sha256", cleanSecret).update(messageNew).digest("hex");
 
-  const expected = crypto
-    .createHmac("sha256", cleanSecret)
-    .update(messageToSign)
-    .digest("hex");
+  // 2. Eski Yöntem (Float/toFixed(4) Yöntemi)
+  const messageOld = `${playerID}-${carID}-${numLevelID}-${numDistance.toFixed(4)}-${numTopSpeed.toFixed(4)}-${numAvgSpeed.toFixed(4)}-${ts}`;
+  const expectedOld = crypto.createHmac("sha256", cleanSecret).update(messageOld).digest("hex");
 
-  if (sig !== expected) {
-    console.log("[signature] mismatch:", { messageToSign, received: sig, expected });
+  // Kontrol: İkisinden biriyle eşleşiyor mu?
+  const isNewValid = sig === expectedNew;
+  const isOldValid = sig === expectedOld;
+
+  if (!isNewValid && !isOldValid) {
+    console.log("[signature] mismatch:", { messageNew, messageOld, received: sig });
+    return res.status(401).json({ error: "Unauthorized" });
   }
+
+  // Başarılı logu (Hangi yöntemin çalıştığını görmek için)
+  console.log(`[signature] verified with ${isNewValid ? "NEW (INT)" : "OLD (FLOAT)"} method for player: ${playerID}`);
+
+  seenSignatures.add(sig);
+  next();
+}
 
   let valid = false;
   try {
